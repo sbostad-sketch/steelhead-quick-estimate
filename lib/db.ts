@@ -1,4 +1,3 @@
-import Database from "better-sqlite3";
 import path from "node:path";
 import { DEFAULT_SETTINGS } from "@/lib/default-settings";
 import { EstimateSettings, LeadSubmission } from "@/lib/types";
@@ -27,19 +26,25 @@ const POSTGRES_URL = process.env.POSTGRES_URL?.trim() || "";
 const USE_POSTGRES = POSTGRES_URL.length > 0;
 
 let sqliteDb: any = null;
+let sqliteInitPromise: Promise<any> | null = null;
 let pgPoolPromise: Promise<PgPoolLike> | null = null;
 
 function nowUnix(): number {
   return Math.floor(Date.now() / 1000);
 }
 
-function initSqlite(): any {
-  if (sqliteDb) return sqliteDb;
+async function getSqliteConstructor(): Promise<new (dbPath: string) => any> {
+  try {
+    const sqliteModule = (await import("better-sqlite3")) as {
+      default: new (dbPath: string) => any;
+    };
+    return sqliteModule.default;
+  } catch {
+    throw new Error("SQLite driver missing. Run: npm install better-sqlite3");
+  }
+}
 
-  const dbPath = process.env.SQLITE_PATH || path.join(process.cwd(), "data.sqlite");
-  const db = new Database(dbPath);
-  db.pragma("journal_mode = WAL");
-
+function initializeSqliteSchema(db: any): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS app_settings (
       key TEXT PRIMARY KEY,
@@ -79,9 +84,48 @@ function initSqlite(): any {
       JSON.stringify(DEFAULT_SETTINGS)
     );
   }
+}
 
-  sqliteDb = db;
-  return db;
+async function initSqlite(): Promise<any> {
+  if (sqliteDb) return sqliteDb;
+
+  if (!sqliteInitPromise) {
+    sqliteInitPromise = (async () => {
+      const Database = await getSqliteConstructor();
+
+      const defaultSqlitePath =
+        process.env.VERCEL || process.env.NODE_ENV === "production"
+          ? "/tmp/steelhead-quick-estimate.sqlite"
+          : path.join(process.cwd(), "data.sqlite");
+      const primaryPath = process.env.SQLITE_PATH || defaultSqlitePath;
+      const fallbackPath = "/tmp/steelhead-quick-estimate.sqlite";
+      const candidatePaths = primaryPath === fallbackPath ? [primaryPath] : [primaryPath, fallbackPath];
+
+      let lastError: Error | null = null;
+      for (const dbPath of candidatePaths) {
+        try {
+          const db = new Database(dbPath);
+          db.pragma("journal_mode = WAL");
+          initializeSqliteSchema(db);
+          return db;
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error(String(error));
+        }
+      }
+
+      throw new Error(
+        `Unable to initialize SQLite database${lastError ? `: ${lastError.message}` : ""}`
+      );
+    })();
+  }
+
+  try {
+    sqliteDb = await sqliteInitPromise;
+    return sqliteDb;
+  } catch (error) {
+    sqliteInitPromise = null;
+    throw error;
+  }
 }
 
 async function getPgPool(): Promise<PgPoolLike> {
@@ -93,11 +137,7 @@ async function getPgPool(): Promise<PgPoolLike> {
     pgPoolPromise = (async () => {
       let PoolCtor: new (options: { connectionString: string; ssl?: false | { rejectUnauthorized: boolean } }) => PgPoolLike;
       try {
-        const dynamicImport = new Function(
-          "specifier",
-          "return import(specifier)"
-        ) as (specifier: string) => Promise<unknown>;
-        const pgModule = (await dynamicImport("pg")) as {
+        const pgModule = (await import("pg")) as {
           Pool: new (options: { connectionString: string; ssl?: false | { rejectUnauthorized: boolean } }) => PgPoolLike;
         };
         PoolCtor = pgModule.Pool;
@@ -184,7 +224,7 @@ export async function getSettings(): Promise<EstimateSettings> {
     return parsed as EstimateSettings;
   }
 
-  const db = initSqlite();
+  const db = await initSqlite();
   const row = db
     .prepare("SELECT value FROM app_settings WHERE key = ?")
     .get("estimate_settings") as { value: string };
@@ -201,7 +241,7 @@ export async function updateSettings(next: EstimateSettings): Promise<void> {
     return;
   }
 
-  const db = initSqlite();
+  const db = await initSqlite();
   db.prepare("UPDATE app_settings SET value = ? WHERE key = ?").run(
     JSON.stringify(next),
     "estimate_settings"
@@ -234,7 +274,7 @@ export async function createLead(lead: LeadSubmission): Promise<number> {
     return Number(row.id);
   }
 
-  const db = initSqlite();
+  const db = await initSqlite();
   const result = db
     .prepare(
       `
@@ -280,7 +320,7 @@ export async function listLeads(): Promise<LeadListItem[]> {
     }));
   }
 
-  const db = initSqlite();
+  const db = await initSqlite();
   return db
     .prepare(
       "SELECT id, created_at, name, phone, email, zip, project_type FROM leads ORDER BY datetime(created_at) DESC"
@@ -325,7 +365,7 @@ export async function listLeadExports(): Promise<LeadExportRecord[]> {
     }));
   }
 
-  const db = initSqlite();
+  const db = await initSqlite();
   return db
     .prepare(
       `
@@ -380,7 +420,7 @@ export async function getLeadExportById(id: number): Promise<LeadExportRecord | 
     };
   }
 
-  const db = initSqlite();
+  const db = await initSqlite();
   const row = db
     .prepare(
       `
@@ -410,7 +450,7 @@ export async function createAdminSession(tokenHash: string, ttlSeconds: number):
     return;
   }
 
-  const db = initSqlite();
+  const db = await initSqlite();
   db.prepare("INSERT INTO admin_sessions (token_hash, expires_at_unix) VALUES (?, ?)").run(tokenHash, expiresUnix);
 }
 
@@ -421,7 +461,7 @@ export async function deleteAdminSession(tokenHash: string): Promise<void> {
     return;
   }
 
-  const db = initSqlite();
+  const db = await initSqlite();
   db.prepare("DELETE FROM admin_sessions WHERE token_hash = ?").run(tokenHash);
 }
 
@@ -432,7 +472,7 @@ export async function pruneExpiredAdminSessions(): Promise<void> {
     return;
   }
 
-  const db = initSqlite();
+  const db = await initSqlite();
   db.prepare("DELETE FROM admin_sessions WHERE expires_at_unix <= ?").run(nowUnix());
 }
 
@@ -454,7 +494,7 @@ export async function isAdminSessionValid(tokenHash: string): Promise<boolean> {
     return Boolean(row);
   }
 
-  const db = initSqlite();
+  const db = await initSqlite();
   const row = db
     .prepare(
       `
@@ -467,8 +507,4 @@ export async function isAdminSessionValid(tokenHash: string): Promise<boolean> {
     .get(tokenHash, nowUnix());
 
   return Boolean(row);
-}
-
-if (!USE_POSTGRES) {
-  initSqlite();
 }

@@ -7,6 +7,22 @@ type Props = {
   initialSettings: EstimateSettings;
 };
 
+type SettingsApiPayload = {
+  ok?: boolean;
+  error?: string;
+  details?: string;
+};
+
+async function readSettingsPayload(res: Response): Promise<SettingsApiPayload> {
+  const raw = await res.text();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as SettingsApiPayload;
+  } catch {
+    return {};
+  }
+}
+
 export default function AdminSettingsForm({ initialSettings }: Props) {
   const [settings, setSettings] = useState<EstimateSettings>(initialSettings);
   const [status, setStatus] = useState("");
@@ -63,8 +79,11 @@ export default function AdminSettingsForm({ initialSettings }: Props) {
         body: JSON.stringify(settings)
       });
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to save settings");
+      const data = await readSettingsPayload(res);
+      if (!res.ok) {
+        const message = data.error || "Failed to save settings";
+        throw new Error(data.details ? `${message}: ${data.details}` : message);
+      }
 
       setStatus("Settings saved.");
     } catch (err) {

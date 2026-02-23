@@ -18,6 +18,23 @@ const complexityOptions = [
   { value: "difficult", label: "Difficult" }
 ] as const;
 
+type ApiErrorPayload = {
+  error?: string;
+  details?: string;
+  leadId?: number;
+  estimate?: EstimateResult;
+};
+
+async function readApiPayload(res: Response): Promise<ApiErrorPayload> {
+  const raw = await res.text();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as ApiErrorPayload;
+  } catch {
+    return {};
+  }
+}
+
 export default function EstimateForm() {
   const [inputs, setInputs] = useState<EstimateInputs>({
     projectType: "Fence",
@@ -59,8 +76,14 @@ export default function EstimateForm() {
         body: JSON.stringify(inputs)
       });
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Unable to generate estimate");
+      const data = await readApiPayload(res);
+      if (!res.ok) {
+        const message = data.error || "Unable to generate estimate";
+        throw new Error(data.details ? `${message}: ${data.details}` : message);
+      }
+      if (!data.estimate) {
+        throw new Error("Estimate API returned no estimate payload");
+      }
 
       setEstimate(data.estimate);
       setStatus("Estimate generated. Submit your contact details to save this lead.");
@@ -103,8 +126,14 @@ export default function EstimateForm() {
         body: fd
       });
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Unable to submit lead");
+      const data = await readApiPayload(res);
+      if (!res.ok) {
+        const message = data.error || "Unable to submit lead";
+        throw new Error(data.details ? `${message}: ${data.details}` : message);
+      }
+      if (!data.leadId) {
+        throw new Error("Lead API returned no lead id");
+      }
 
       setStatus(`Lead submitted successfully. Reference #${data.leadId}.`);
     } catch (err) {
